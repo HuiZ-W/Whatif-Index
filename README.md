@@ -14,6 +14,21 @@ ctest --test-dir build --output-on-failure
 python3 -m unittest discover -s baselines/sqlite -p 'test_*.py' -v
 ```
 
+## Datasets
+
+We use eight graph datasets. Click each dataset name to access its source or generator. The sizes below refer to the property graphs used in our experiments.
+
+| Dataset | Nodes | Edges |
+| --- | ---: | ---: |
+| [Star Wars](https://github.com/neo4j-graph-examples/star-wars) | 260 | 611 |
+| [WWC2019](https://github.com/neo4j-graph-examples/wwc2019) | 2,486 | 16,174 |
+| [StackOverflow](https://github.com/neo4j-graph-examples/stackoverflow) | 6,193 | 11,540 |
+| [FinCEN](https://github.com/neo4j-graph-examples/fincen) | 8,608 | 77,253 |
+| [ICIJ OffshoreLeaks](https://offshoreleaks.icij.org/pages/database) | 1,908,466 | 3,124,710 |
+| [DBpedia](https://www.dbpedia.org/resources/knowledge-graphs/) | 8,970,120 | 67,526,281 |
+| [Freebase](https://developers.google.com/freebase) | 29,119,948 | 111,773,402 |
+| [LDBC-SNB SF50](https://ldbcouncil.org/benchmarks/snb/) | 158,913,479 | 1,022,901,700 |
+
 ## Data format
 
 Each dataset directory contains materialized per-variable pattern matches and a causal DAG:
