@@ -4,12 +4,15 @@ C++17 implementation of a cube-based index for what-if queries on property-graph
 
 ## Included components
 
-- `v4_full_lattice/`: exact subgraph-join executor, prefix reuse, ordering, and full-join/rollup support.
-- `v6_wide_scope/`: decomposition, adjustment-scope planning, local cuboids, boundary views, snapshot persistence, and online workers. Global causal scopes use Boost.Multiprecision; local cube masks remain bounded-width.
+- `src/` and `include/whatif/`: one index implementation, including decomposition, adjustment-scope planning, local cuboids, boundary views, and snapshot persistence. The `core/` subdirectories contain its shared subgraph-join, prefix-reuse, ordering, and rollup execution primitives.
+- `benchmarks/`: construction and online-query entry points for the proposed method, baselines, and ablations.
+- `tests/`: regression tests and test-only reference code. The fixed-width causal model in `tests/reference/` is a comparison oracle, never linked into the production programs.
 - `baselines/sqlite/`: SQLite joins over materialized variable-match tables, plus correctness tests and a portable command-line entry point. This is the adapted relational baseline called **CaRL-PG** in the experiments, not the original CaRL implementation.
 - `examples/tiny/`: a synthetic input with a known answer.
 
-Directory and C++ namespace version identifiers are retained to avoid changing implementation interfaces. `causal_index_v5` is also used by the wide-scope implementation.
+The public C++ namespace is `whatif`; shared execution primitives use `whatif::core`.
+Global causal scopes use Boost.Multiprecision; local cube masks remain bounded-width.
+All experiment methods use this single source tree and select their construction policy through the `METHOD` argument. Snapshot format identifiers are unchanged so previously generated indexes remain readable.
 
 ## Requirements
 
@@ -32,7 +35,9 @@ python3 -m unittest discover -s baselines/sqlite -p 'test_*.py' -v
 
 The C++ tests cover boundary joins, snapshot round trips, wide causal scopes, rollup completion, streaming construction, sampling, and join metrics. Test assertions remain enabled in Release builds.
 
-The initial release was checked in a clean Linux build with GCC 13.3.0 and Boost 1.83.0: all six CTest tests and all ten SQLite tests passed. Both quick-start queries returned the expected answer. GCC emitted a warning in Boost.Multiprecision headers during the build; it did not prevent compilation or test completion.
+The test suite includes the index tests, shared-executor regression tests, and three causal-workload fixtures. Test-only reference code can be excluded with `-DBUILD_TESTING=OFF`.
+
+The unified layout was verified on Linux with GCC 13.3.0 and Boost 1.83.0: all 11 CTest checks (including the CLI smoke test) and all 10 SQLite tests passed. On the bundled tiny input, all seven documented construction policies preserve the previous release's counts and query answers; snapshots were checked for compatibility in both directions. The existing Boost.Multiprecision compiler warning remains; it does not prevent compilation or these tests from passing.
 
 ## Quick start
 
@@ -40,14 +45,14 @@ Build a snapshot from the synthetic materialized matches:
 
 ```sh
 mkdir -p results
-./build/v6_wide_scope/causal_index_v5_boundary_benchmark \
+./build/whatif_build \
   examples/tiny boundary-adjustment-prune results/tiny.bin 6
 ```
 
 Evaluate the supplied query:
 
 ```sh
-./build/v6_wide_scope/causal_index_online_worker \
+./build/whatif_query \
   results/tiny.bin examples/tiny/causal.tsv Ours \
   < examples/tiny/query.json
 ```
