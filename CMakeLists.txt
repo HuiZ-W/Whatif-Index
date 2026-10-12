@@ -1,0 +1,6 @@
+cmake_minimum_required(VERSION 3.16)
+project(WhatifIndex LANGUAGES CXX)
+find_package(Boost REQUIRED)
+include_directories(SYSTEM ${Boost_INCLUDE_DIRS})
+enable_testing()
+add_subdirectory(v6_wide_scope)

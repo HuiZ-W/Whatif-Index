@@ -1,0 +1,4 @@
+# variable	parents
+X	Z
+Y	X,Z
+Z	

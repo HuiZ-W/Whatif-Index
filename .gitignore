@@ -1,0 +1,12 @@
+/build*/
+/results/
+/data/
+*.bin
+*.sqlite
+*.sqlite-*
+*.log
+__pycache__/
+*.pyc
+.env
+.env.*
+.DS_Store
