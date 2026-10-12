@@ -44,9 +44,9 @@ CausalDag loadDag(const std::string &path) {
 
 int main(int argc, char **argv) {
   try {
-    if (argc != 4) throw std::runtime_error("Usage: whatif_query snapshot causal.tsv FullCube|Ours");
+    if (argc != 4) throw std::runtime_error("Usage: whatif_query snapshot causal.tsv FullCubeQuery|FaCTQuery");
     const std::string method = argv[3];
-    if (method != "FullCube" && method != "Ours") throw std::runtime_error("unknown method");
+    if (method != "FullCubeQuery" && method != "FaCTQuery") throw std::runtime_error("unknown query method: " + method);
     const auto index = MaterializedBoundaryIndex::load(argv[1]);
     const auto dag = loadDag(argv[2]);
     ptree ready;
@@ -122,7 +122,7 @@ int main(int argc, char **argv) {
         OnlineScopeStats stats;
         const auto start = std::chrono::steady_clock::now();
         const bool plan_only = request.get<bool>("plan_only", false);
-        const auto result = index.executeExactScope({request.get<std::string>("query_id", "online"), scope}, output_scope, false, method == "FullCube", &stats, plan_only);
+        const auto result = index.executeExactScope({request.get<std::string>("query_id", "online"), scope}, output_scope, false, method == "FullCubeQuery", &stats, plan_only);
         response.put("eligible_multivariable_views", stats.eligible_multivariable_views);
         response.put("selected_multivariable_views", stats.selected_multivariable_views);
         response.put("selected_attachment_views", stats.selected_attachment_views);

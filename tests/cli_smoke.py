@@ -2,14 +2,13 @@
 import argparse
 import json
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
 
 METHODS = (
-    'full-join', 'full-join-rollup', 'parent-no-reuse',
-    'boundary-adjustment-prune', 'boundary-adjustment-random-prune',
-    'boundary-adjustment-no-prune', 'boundary-adjustment-prune-no-reuse',
+    'FullCube', 'FullCube+', 'FaCT', 'FaCT-O', 'FaCT-P', 'FaCT-R',
 )
 
 
@@ -25,6 +24,7 @@ def query(worker, snapshot, data, method, request):
     records = [json.loads(line) for line in run(
         [worker, snapshot, data / 'causal.tsv', method], request).splitlines()]
     assert records[0]['status'] == 'ready', records
+    assert records[0]['method'] == method, records
     answer = records[-1]
     assert answer['status'] == 'ok', answer
     assert int(answer['N']) == 4, answer
@@ -35,10 +35,7 @@ def query(worker, snapshot, data, method, request):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--build-dir', type=Path, required=True)
-    parser.add_argument('--reference-builder', type=Path)
-    parser.add_argument('--reference-query', type=Path)
     args = parser.parse_args()
-    assert bool(args.reference_builder) == bool(args.reference_query)
     data = Path(__file__).resolve().parents[1] / 'examples' / 'tiny'
     request = (data / 'query.json').read_text()
     worker = args.build_dir / 'whatif_query'
@@ -46,21 +43,40 @@ def main():
     with tempfile.TemporaryDirectory(prefix='whatif-cli-') as temporary:
         root = Path(temporary)
         for method in METHODS:
-            mode = 'FullCube' if method.startswith('full-join') else 'Ours'
+            mode = 'FullCubeQuery' if method.startswith('FullCube') else 'FaCTQuery'
             snapshot = root / (method + '.bin')
-            run([args.build_dir / 'whatif_build', data, method, snapshot, '6'])
+            output = run([args.build_dir / 'whatif_build', data, method, snapshot, '6'])
+            assert f'method={method}' in output.splitlines(), output
             actual = query(worker, snapshot, data, mode, request)
             if expected is None:
                 expected = actual
             assert actual == expected, (method, actual, expected)
-            if args.reference_builder:
-                reference_snapshot = root / (method + '-reference.bin')
-                run([args.reference_builder, data, method, reference_snapshot, '6'])
-                assert query(args.reference_query, reference_snapshot, data, mode, request) == actual
-                # Both directions must preserve the existing snapshot format.
-                assert query(worker, reference_snapshot, data, mode, request) == actual
-                assert query(args.reference_query, snapshot, data, mode, request) == actual
             print(f'{method}: counts and probability match')
+        # Old names must fail, rather than silently selecting another policy.
+        for method in ('full-join', 'boundary-adjustment-prune', 'parent-no-reuse',
+                       'FaCT-ORP', 'fact', 'unknown'):
+            target = root / 'rejected.bin'
+            result = subprocess.run(
+                [str(args.build_dir / 'whatif_build'), str(data), method, str(target)],
+                text=True, capture_output=True, timeout=120)
+            assert result.returncode != 0 and 'unknown construction method' in result.stderr, result
+            assert not target.exists(), method
+        for method in ('FullCube', 'Ours', 'FaCT', 'unknown'):
+            result = subprocess.run(
+                [str(worker), str(snapshot), str(data / 'causal.tsv'), method],
+                text=True, capture_output=True, timeout=120)
+            assert result.returncode != 0, result
+            error = json.loads(result.stdout)
+            assert 'unknown query method' in error['error'], error
+        sqlite_cli = data.parents[1] / 'baselines' / 'sqlite' / 'run.py'
+        database = root / 'tiny.sqlite'
+        run([sys.executable, sqlite_cli, 'prepare', data, database])
+        relational = json.loads(run([
+            sys.executable, sqlite_cli, 'query', database, data / 'query.json']))
+        assert relational['method'] == 'CaRL-PG', relational
+        assert relational['status'] == 'ok', relational
+        assert int(relational['N']) == 4 and float(relational['answer']) == 1.0, relational
+        print('CaRL-PG: counts, probability, and method label match')
         direct = [json.loads(line) for line in run(
             [args.build_dir / 'whatif_online_join', data], request).splitlines()][-1]
         assert direct['status'] == 'ok', direct

@@ -78,13 +78,16 @@ class SQLiteJoinTests(unittest.TestCase):
         from unittest.mock import patch
         with patch('sqlite_join.sqlite3.connect', wraps=sqlite3.connect) as factory:
             engine=SQLiteJoin(self.root/'test.sqlite', settings='default_no_statement_cache')
+        reference=sqlite3.connect(self.root/'test.sqlite', cached_statements=0)
         try:
             self.assertEqual(factory.call_args.kwargs['cached_statements'],0)
-            self.assertEqual(engine.db.execute('PRAGMA cache_size').fetchone()[0],-2000)
-            self.assertEqual(engine.db.execute('PRAGMA temp_store').fetchone()[0],0)
+            for pragma in ('cache_size','temp_store','threads','mmap_size','automatic_index'):
+                self.assertEqual(engine.db.execute('PRAGMA '+pragma).fetchone(),
+                                 reference.execute('PRAGMA '+pragma).fetchone())
             self.assertEqual(engine.query(self.q,True)['joint'],self.oracle(self.q))
         finally:
             engine.close()
+            reference.close()
 
     def test_insufficient_support(self):
         r=self.engine.query({**self.q,'x':'missing'})

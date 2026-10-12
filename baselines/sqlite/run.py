@@ -1,4 +1,4 @@
-"""Portable entry point for the released SQLite match-join implementation."""
+"""CaRL-PG: SQLite match joins and frequency aggregation for do-queries."""
 import argparse
 import hashlib
 import json
@@ -29,7 +29,9 @@ def main():
     else:
         engine = SQLiteJoin(args.database, settings=args.settings)
         try:
-            print(json.dumps(engine.query(json.loads(args.request.read_text()), True), default=str))
+            result = engine.query(json.loads(args.request.read_text()), True)
+            result['method'] = 'CaRL-PG'
+            print(json.dumps(result, default=str))
         finally:
             engine.close()
 

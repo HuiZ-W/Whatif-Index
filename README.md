@@ -1,6 +1,6 @@
 # Whatif-Index
 
-C++17 implementation of a cube-based index for what-if queries on property-graph pattern matches. The index materializes local frequency cuboids and mapping-preserving boundary views. Queries use a local cuboid when available, or join saved views before evaluating the adjustment formula.
+C++17 implementation of **FaCT**, a cube-based index for what-if queries on property-graph pattern matches. The index materializes local frequency cuboids and mapping-preserving boundary views. **FaCTQuery** uses a local cuboid when available, or joins saved views before evaluating the adjustment formula.
 
 ## Included components
 
@@ -37,7 +37,7 @@ The C++ tests cover boundary joins, snapshot round trips, wide causal scopes, ro
 
 The test suite includes the index tests, shared-executor regression tests, and three causal-workload fixtures. Test-only reference code can be excluded with `-DBUILD_TESTING=OFF`.
 
-The unified layout was verified on Linux with GCC 13.3.0 and Boost 1.83.0: all 11 CTest checks (including the CLI smoke test) and all 10 SQLite tests passed. On the bundled tiny input, all seven documented construction policies preserve the previous release's counts and query answers; snapshots were checked for compatibility in both directions. The existing Boost.Multiprecision compiler warning remains; it does not prevent compilation or these tests from passing.
+The test suite includes 11 CTest checks (including a CLI smoke test for all six public construction methods) and 10 SQLite tests. The CLI test checks counts, query answers, method labels, and rejection of unsupported method names. Snapshot format identifiers are unchanged. The existing Boost.Multiprecision compiler warning does not prevent compilation or these tests from passing.
 
 ## Quick start
 
@@ -46,20 +46,22 @@ Build a snapshot from the synthetic materialized matches:
 ```sh
 mkdir -p results
 ./build/whatif_build \
-  examples/tiny boundary-adjustment-prune results/tiny.bin 6
+  examples/tiny FaCT results/tiny.bin 6
 ```
 
 Evaluate the supplied query:
 
 ```sh
 ./build/whatif_query \
-  results/tiny.bin examples/tiny/causal.tsv Ours \
+  results/tiny.bin examples/tiny/causal.tsv FaCTQuery \
   < examples/tiny/query.json
 ```
 
 The worker emits a readiness record followed by the query response. The example has four complete mappings and returns `P(Y=1 | do(X=1)) = 1`.
 
-Run the equivalent SQLite baseline:
+For **FullCubeQuery**, pass `FullCubeQuery` as the final argument to `whatif_query`, with a snapshot built by `FullCube` or `FullCube+`. For **OnlineJoin**, run `./build/whatif_online_join examples/tiny < examples/tiny/query.json`; it joins the supplied pattern matches without a cube index.
+
+Run **CaRL-PG**, the SQLite baseline:
 
 ```sh
 python3 baselines/sqlite/run.py prepare examples/tiny results/tiny.sqlite
@@ -101,20 +103,23 @@ The C++ worker validates the adjustment set. The SQLite adapter evaluates the su
 The benchmark interface is:
 
 ```text
-DATASET_DIR METHOD SNAPSHOT [PARENT_K=6] [INSTANCE_CAP=0] [SCOPE_ORDER_SEED=20260716]
+DATASET_DIR METHOD SNAPSHOT [WIDTH_BOUND=6] [INSTANCE_CAP=0] [SCOPE_ORDER_SEED=20260716]
 ```
 
-| Purpose | METHOD |
+| METHOD (paper name) | Construction policy |
 | --- | --- |
-| FullCube | `full-join` |
-| FullCube with rollup completion | `full-join-rollup` |
-| Decomposition without reuse or pruning | `parent-no-reuse` |
-| Proposed construction | `boundary-adjustment-prune` |
-| Random-order ablation | `boundary-adjustment-random-prune` |
-| No-pruning ablation | `boundary-adjustment-no-prune` |
-| No-reuse ablation | `boundary-adjustment-prune-no-reuse` |
+| `FullCube` | Full cube, independently joining each scope |
+| `FullCube+` | Full cube with rollup projection and residual-join completion |
+| `FaCT` | Proposed construction with ordering, reuse, and adjustment-set pruning |
+| `FaCT-O` | Random scope order with reuse and pruning retained |
+| `FaCT-P` | Proposed ordering and reuse, without adjustment-set pruning |
+| `FaCT-R` | Proposed ordering and pruning, with scopes joined independently |
 
-`K` controls planner merging; it does not split an oversized atomic parent scope. `INSTANCE_CAP=0` applies no additional instance cap. Construction reports loading, planning, construction and snapshot metrics separately. `build_join_count` counts calls, whereas `join_work_pairs` counts candidate pair work; these are different measurements.
+Method names are case-sensitive and match the paper; legacy command-line names and non-paper experimental branches are not exposed. `FaCT-O` randomizes the scope traversal while retaining the greedy variable order within scopes. `FaCT-P` disables adjustment-set scope pruning, not boundary-view redundancy elimination.
+
+**FaCT-ORP is not exposed in this release.** The previous decomposition-only configuration still used greedy variable ordering and a different boundary workload, so it cannot be labeled as removing all three optimizations under the same workload. Its paper results require a separately verified configuration; this release does not silently substitute another method for it.
+
+`WIDTH_BOUND` is the paper's width bound `b`; it controls planner merging and does not split an oversized atomic parent scope. `INSTANCE_CAP=0` applies no additional instance cap. Construction reports loading, planning, construction and snapshot metrics separately. `build_join_count` counts calls, whereas `join_work_pairs` counts candidate pair work; these are different measurements.
 
 `CAUSAL_INDEX_SCALE_PERCENT` optionally subsamples each variable's input rows. This is instance subsampling, **not** induced-subgraph sampling. Preserve the intended population and measurement protocol when comparing experiments.
 

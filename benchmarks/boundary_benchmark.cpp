@@ -212,16 +212,9 @@ template <typename Function> double measureMilliseconds(Function &&function) {
 
 void printUsage(const char *program) {
   std::cerr << "usage: " << program
-            << " DATASET_DIR METHOD SNAPSHOT [PARENT_K=6] [INSTANCE_CAP=0] "
+            << " DATASET_DIR METHOD SNAPSHOT [WIDTH_BOUND=6] [INSTANCE_CAP=0] "
                "[SCOPE_ORDER_SEED=20260716]\n"
-            << "METHOD: full-join | full-join-rollup | parent-no-reuse | parent-reuse-alpha | "
-               "parent-adjustment-no-reuse | "
-               "parent-adjustment-reuse-alpha | "
-               "boundary-join | boundary-no-prune | boundary-random | "
-               "boundary-random-no-prune | boundary-adjustment-prune | "
-               "boundary-adjustment-no-prune | "
-               "boundary-adjustment-random-prune | "
-               "boundary-adjustment-random-no-prune\n";
+            << "METHOD: FullCube | FullCube+ | FaCT | FaCT-O | FaCT-P | FaCT-R\n";
 }
 
 } // namespace
@@ -240,6 +233,11 @@ int main(int argc, char **argv) {
 
     const std::filesystem::path dataset = argv[1];
     const std::string method = argv[2];
+    if (method != "FullCube" && method != "FullCube+" &&
+        method != "FaCT" && method != "FaCT-O" &&
+        method != "FaCT-P" && method != "FaCT-R") {
+      throw std::runtime_error("unknown construction method: " + method);
+    }
     const std::filesystem::path snapshot = argv[3];
     const std::size_t parent_k =
         argc > 4 ? static_cast<std::size_t>(std::stoull(argv[4])) : 6;
@@ -249,7 +247,7 @@ int main(int argc, char **argv) {
         argc > 6 ? static_cast<std::uint64_t>(std::stoull(argv[6]))
                  : kSampleSeed;
     if (parent_k == 0) {
-      throw std::runtime_error("PARENT_K must be positive");
+      throw std::runtime_error("WIDTH_BOUND must be positive");
     }
     const auto scale_text = std::getenv("CAUSAL_INDEX_SCALE_PERCENT");
     const std::size_t scale_percent = scale_text ? std::stoull(scale_text) : 100;
@@ -332,9 +330,9 @@ int main(int argc, char **argv) {
         };
 
     std::vector<CausalEdge> build_edges = causal.edges;
-    if (method == "full-join" || method == "full-join-rollup") {
+    if (method == "FullCube" || method == "FullCube+") {
       config.stream_all_subset_cubes = true;
-      config.tree_executor.full_join_rollup = method == "full-join-rollup";
+      config.tree_executor.full_join_rollup = method == "FullCube+";
       config.tree_executor.rollup_callback = [&](const whatif::core::RollupStats& s) {
         std::lock_guard<std::mutex> lock(metric_output_mutex);
         std::cout << "rollup_used=" << s.used << '\n'
@@ -389,70 +387,12 @@ int main(int argc, char **argv) {
         config.tree_executor.plan_order_from_unpruned_lattice = true;
       };
 
-      if (method == "parent-no-reuse") {
-        config.tree_executor.variable_order_policy =
-            whatif::core::VariableOrderPolicy::PartialWorkloadGreedy;
-        config.tree_executor.execution_schedule =
-            whatif::core::ExecutionSchedule::IndependentSources;
-      } else if (method == "parent-reuse-alpha") {
-        config.tree_executor.variable_order_policy =
-            whatif::core::VariableOrderPolicy::PartialWorkloadGreedy;
-        config.tree_executor.execution_schedule =
-            whatif::core::ExecutionSchedule::ScopeOrderedWorkingPath;
-        config.tree_executor.scope_order_policy =
-            whatif::core::ScopeOrderPolicy::Alphabetical;
-      } else if (method == "parent-adjustment-no-reuse") {
-        configure_adjustment_workload();
-        config.tree_executor.execution_schedule =
-            whatif::core::ExecutionSchedule::IndependentSources;
-      } else if (method == "parent-adjustment-reuse-alpha") {
-        configure_adjustment_workload();
-        config.tree_executor.execution_schedule =
-            whatif::core::ExecutionSchedule::ScopeOrderedWorkingPath;
-        config.tree_executor.scope_order_policy =
-            whatif::core::ScopeOrderPolicy::Alphabetical;
-      } else if (method == "boundary-join") {
-        config.tree_executor.variable_order_policy =
-            whatif::core::VariableOrderPolicy::PartialWorkloadGreedy;
-        config.tree_executor.execution_schedule =
-            whatif::core::ExecutionSchedule::DfsPrefixTree;
-      } else if (method == "boundary-no-prune") {
-        config.prune_redundant_boundary_views = false;
-        config.tree_executor.variable_order_policy =
-            whatif::core::VariableOrderPolicy::PartialWorkloadGreedy;
-        config.tree_executor.execution_schedule =
-            whatif::core::ExecutionSchedule::DfsPrefixTree;
-      } else if (method == "boundary-random") {
-        config.tree_executor.variable_order_policy =
-            whatif::core::VariableOrderPolicy::PartialWorkloadGreedy;
-        config.tree_executor.execution_schedule =
-            whatif::core::ExecutionSchedule::ScopeOrderedWorkingPath;
-        config.tree_executor.scope_order_policy =
-            whatif::core::ScopeOrderPolicy::Random;
-        config.tree_executor.scope_order_seed = scope_order_seed;
-      } else if (method == "boundary-random-no-prune") {
-        config.prune_redundant_boundary_views = false;
-        config.tree_executor.variable_order_policy =
-            whatif::core::VariableOrderPolicy::PartialWorkloadGreedy;
-        config.tree_executor.execution_schedule =
-            whatif::core::ExecutionSchedule::ScopeOrderedWorkingPath;
-        config.tree_executor.scope_order_policy =
-            whatif::core::ScopeOrderPolicy::Random;
-        config.tree_executor.scope_order_seed = scope_order_seed;
-      } else if (method == "boundary-adjustment-prune" ||
-                 method == "boundary-adjustment-prune-no-reuse" ||
-                 method == "boundary-adjustment-no-prune" ||
-                 method == "boundary-adjustment-random-prune" ||
-                 method == "boundary-adjustment-random-no-prune") {
+      {
         const bool prune_local_scopes =
-            method == "boundary-adjustment-prune" ||
-            method == "boundary-adjustment-prune-no-reuse" ||
-            method == "boundary-adjustment-random-prune";
-        const bool random_scope_order =
-            method == "boundary-adjustment-random-prune" ||
-            method == "boundary-adjustment-random-no-prune";
+            method == "FaCT" || method == "FaCT-R" || method == "FaCT-O";
+        const bool random_scope_order = method == "FaCT-O";
         configure_adjustment_workload();
-        if (method == "boundary-adjustment-prune-no-reuse") {
+        if (method == "FaCT-R") {
           config.tree_executor.execution_schedule =
               whatif::core::ExecutionSchedule::IndependentSources;
         } else if (random_scope_order) {
@@ -471,8 +411,6 @@ int main(int argc, char **argv) {
           config.explicit_cube_scopes =
               adjustment_scope_plan->explicit_cube_scopes;
         }
-      } else {
-        throw std::runtime_error("unknown benchmark method: " + method);
       }
     }
 
@@ -562,8 +500,7 @@ int main(int argc, char **argv) {
       std::filesystem::create_directories(snapshot.parent_path());
     }
     const bool stream_cubes_to_disk =
-        method == "full-join" || method == "full-join-rollup" ||
-        method == "parent-adjustment-no-reuse" || method == "parent-no-reuse";
+        method == "FullCube" || method == "FullCube+";
     ExternalCubeStorage external_cubes;
     std::ofstream cube_spool;
     double cube_spool_write_ms = 0.0;
