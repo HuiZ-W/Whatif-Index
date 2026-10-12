@@ -8,7 +8,7 @@ from pathlib import Path
 
 
 METHODS = (
-    'FullCube', 'FullCube+', 'FaCT', 'FaCT-O', 'FaCT-P', 'FaCT-R',
+    'FullCube', 'FullCube+', 'FaCT', 'FaCT-O', 'FaCT-P', 'FaCT-R', 'FaCT-ORP',
 )
 
 
@@ -54,7 +54,7 @@ def main():
             print(f'{method}: counts and probability match')
         # Old names must fail, rather than silently selecting another policy.
         for method in ('full-join', 'boundary-adjustment-prune', 'parent-no-reuse',
-                       'FaCT-ORP', 'fact', 'unknown'):
+                       'fact', 'unknown'):
             target = root / 'rejected.bin'
             result = subprocess.run(
                 [str(args.build_dir / 'whatif_build'), str(data), method, str(target)],

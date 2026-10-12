@@ -37,7 +37,7 @@ The C++ tests cover boundary joins, snapshot round trips, wide causal scopes, ro
 
 The test suite includes the index tests, shared-executor regression tests, and three causal-workload fixtures. Test-only reference code can be excluded with `-DBUILD_TESTING=OFF`.
 
-The test suite includes 11 CTest checks (including a CLI smoke test for all six public construction methods) and 10 SQLite tests. The CLI test checks counts, query answers, method labels, and rejection of unsupported method names. Snapshot format identifiers are unchanged. The existing Boost.Multiprecision compiler warning does not prevent compilation or these tests from passing.
+The test suite includes 11 CTest checks (including a CLI smoke test for all seven public construction methods) and 10 SQLite tests. The CLI test checks counts, query answers, method labels, and rejection of unsupported method names. Snapshot format identifiers are unchanged. The existing Boost.Multiprecision compiler warning does not prevent compilation or these tests from passing.
 
 ## Quick start
 
@@ -114,10 +114,9 @@ DATASET_DIR METHOD SNAPSHOT [WIDTH_BOUND=6] [INSTANCE_CAP=0] [SCOPE_ORDER_SEED=2
 | `FaCT-O` | Random scope order with reuse and pruning retained |
 | `FaCT-P` | Proposed ordering and reuse, without adjustment-set pruning |
 | `FaCT-R` | Proposed ordering and pruning, with scopes joined independently |
+| `FaCT-ORP` | Same decomposition and boundary workload, with fixed alphabetical order, independent scope joins, and no adjustment-set scope pruning |
 
 Method names are case-sensitive and match the paper; legacy command-line names and non-paper experimental branches are not exposed. `FaCT-O` randomizes the scope traversal while retaining the greedy variable order within scopes. `FaCT-P` disables adjustment-set scope pruning, not boundary-view redundancy elimination.
-
-**FaCT-ORP is not exposed in this release.** The previous decomposition-only configuration still used greedy variable ordering and a different boundary workload, so it cannot be labeled as removing all three optimizations under the same workload. Its paper results require a separately verified configuration; this release does not silently substitute another method for it.
 
 `WIDTH_BOUND` is the paper's width bound `b`; it controls planner merging and does not split an oversized atomic parent scope. `INSTANCE_CAP=0` applies no additional instance cap. Construction reports loading, planning, construction and snapshot metrics separately. `build_join_count` counts calls, whereas `join_work_pairs` counts candidate pair work; these are different measurements.
 

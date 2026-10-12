@@ -214,7 +214,7 @@ void printUsage(const char *program) {
   std::cerr << "usage: " << program
             << " DATASET_DIR METHOD SNAPSHOT [WIDTH_BOUND=6] [INSTANCE_CAP=0] "
                "[SCOPE_ORDER_SEED=20260716]\n"
-            << "METHOD: FullCube | FullCube+ | FaCT | FaCT-O | FaCT-P | FaCT-R\n";
+            << "METHOD: FullCube | FullCube+ | FaCT | FaCT-O | FaCT-P | FaCT-R | FaCT-ORP\n";
 }
 
 } // namespace
@@ -235,7 +235,7 @@ int main(int argc, char **argv) {
     const std::string method = argv[2];
     if (method != "FullCube" && method != "FullCube+" &&
         method != "FaCT" && method != "FaCT-O" &&
-        method != "FaCT-P" && method != "FaCT-R") {
+        method != "FaCT-P" && method != "FaCT-R" && method != "FaCT-ORP") {
       throw std::runtime_error("unknown construction method: " + method);
     }
     const std::filesystem::path snapshot = argv[3];
@@ -392,7 +392,14 @@ int main(int argc, char **argv) {
             method == "FaCT" || method == "FaCT-R" || method == "FaCT-O";
         const bool random_scope_order = method == "FaCT-O";
         configure_adjustment_workload();
-        if (method == "FaCT-R") {
+        if (method == "FaCT-ORP") {
+          // Keep the same decomposition and boundary workload, but construct
+          // every local scope independently using a fixed variable order.
+          config.tree_executor.variable_order_policy =
+              whatif::core::VariableOrderPolicy::Alphabetical;
+          config.tree_executor.plan_order_from_unpruned_lattice = false;
+        }
+        if (method == "FaCT-R" || method == "FaCT-ORP") {
           config.tree_executor.execution_schedule =
               whatif::core::ExecutionSchedule::IndependentSources;
         } else if (random_scope_order) {
