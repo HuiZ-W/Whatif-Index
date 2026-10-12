@@ -7,7 +7,6 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
-#include <cstdlib>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -17,7 +16,6 @@
 #include <map>
 #include <mutex>
 #include <optional>
-#include <random>
 #include <set>
 #include <sstream>
 #include <stdexcept>
@@ -30,7 +28,7 @@ using namespace whatif;
 
 namespace {
 
-constexpr std::uint64_t kSampleSeed = 20260716ULL;
+constexpr std::uint64_t kDefaultOrderSeed = 20260716ULL;
 
 struct CausalInput {
   std::vector<CausalEdge> edges;
@@ -78,9 +76,7 @@ std::vector<RoleBinding> parseRoles(const std::string &sample) {
   return roles;
 }
 
-std::vector<VariableInput> loadVariables(const std::filesystem::path &path,
-                                         std::size_t instance_cap,
-                                         std::size_t scale_percent = 100) {
+std::vector<VariableInput> loadVariables(const std::filesystem::path &path) {
   std::ifstream input(path);
   if (!input) {
     throw std::runtime_error("cannot open assignments: " + path.string());
@@ -119,27 +115,11 @@ std::vector<VariableInput> loadVariables(const std::filesystem::path &path,
 
   std::vector<VariableInput> variables;
   variables.reserve(instances.size());
-  std::size_t variable_index = 0;
   for (auto &entry : instances) {
     auto &rows = entry.second;
-    const auto scaled_size = std::max<std::size_t>(
-        1, (rows.size() / 100) * scale_percent +
-               (rows.size() % 100) * scale_percent / 100);
-    const auto keep = instance_cap == 0 ? scaled_size : std::min(scaled_size, instance_cap);
-    if (rows.size() > keep) {
-      std::mt19937_64 random(kSampleSeed +
-                             0x9e3779b97f4a7c15ULL * (variable_index + 1));
-      std::shuffle(rows.begin(), rows.end(), random);
-      rows.resize(keep);
-      std::sort(rows.begin(), rows.end(),
-                [](const auto &left, const auto &right) {
-                  return left.id < right.id;
-                });
-    }
     const auto &role_set = roles[entry.first];
     variables.push_back(
         {entry.first, {role_set.begin(), role_set.end()}, std::move(rows)});
-    ++variable_index;
   }
   return variables;
 }
@@ -225,8 +205,7 @@ template <typename Function> double measureMilliseconds(Function &&function) {
 
 void printUsage(const char *program) {
   std::cerr << "usage: " << program
-            << " DATASET_DIR METHOD SNAPSHOT [WIDTH_BOUND=6] [INSTANCE_CAP=0] "
-               "[SCOPE_ORDER_SEED=20260716]\n"
+            << " DATASET_DIR METHOD SNAPSHOT [WIDTH_BOUND=6] [SEED=20260716]\n"
             << "METHOD: FullCube | FullCube+ | FaCT | FaCT-O | FaCT-P | FaCT-R | FaCT-ORP\n";
 }
 
@@ -239,7 +218,7 @@ int main(int argc, char **argv) {
   std::mutex metric_output_mutex;
   std::filesystem::path temporary_cube_spool;
   try {
-    if (argc < 4 || argc > 7) {
+    if (argc < 4 || argc > 6) {
       printUsage(argv[0]);
       return 64;
     }
@@ -254,17 +233,12 @@ int main(int argc, char **argv) {
     const std::filesystem::path snapshot = argv[3];
     const std::size_t parent_k =
         argc > 4 ? static_cast<std::size_t>(std::stoull(argv[4])) : 6;
-    const std::size_t instance_cap =
-        argc > 5 ? static_cast<std::size_t>(std::stoull(argv[5])) : 0;
     const std::uint64_t scope_order_seed =
-        argc > 6 ? static_cast<std::uint64_t>(std::stoull(argv[6]))
-                 : kSampleSeed;
+        argc > 5 ? static_cast<std::uint64_t>(std::stoull(argv[5]))
+                 : kDefaultOrderSeed;
     if (parent_k == 0) {
       throw std::runtime_error("WIDTH_BOUND must be positive");
     }
-    const auto scale_text = std::getenv("CAUSAL_INDEX_SCALE_PERCENT");
-    if (scale_text && std::string(scale_text) != "100")
-      throw std::runtime_error("row subsampling is not a PG scale experiment; use scripts/prepare_induced_scale.py");
     if (std::filesystem::exists(dataset.parent_path() / "INCOMPLETE"))
       throw std::runtime_error("induced scale preparation is incomplete");
     std::size_t scale_percent = 100;
@@ -278,7 +252,7 @@ int main(int argc, char **argv) {
     std::vector<VariableInput> variables;
     CausalInput causal;
     double load_ms = measureMilliseconds([&] {
-      variables = loadVariables(dataset / "assignments_raw.tsv", instance_cap);
+      variables = loadVariables(dataset / "assignments_raw.tsv");
       causal = loadCausalInput(dataset / "causal.tsv", variables);
     });
     if (variables.empty()) {
@@ -396,10 +370,6 @@ int main(int argc, char **argv) {
         });
         config.include_all_reachable_pairs = false;
         config.materialize_variable_attachments = true;
-        config.materialize_structural_boundaries =
-            std::getenv("CAUSAL_INDEX_STRUCTURAL_BOUNDARIES") != nullptr;
-        if (config.materialize_structural_boundaries)
-          std::cout << "boundary_policy=query_independent_directed_tree_boundaries\n";
         config.query_workload = adjustment_scope_plan->query_workload;
         config.precompiled_boundary_plan =
             std::move(adjustment_scope_plan->boundary_plan);
@@ -422,7 +392,6 @@ int main(int argc, char **argv) {
           // every local scope independently using a fixed variable order.
           config.tree_executor.variable_order_policy =
               whatif::core::VariableOrderPolicy::Alphabetical;
-          config.tree_executor.plan_order_from_unpruned_lattice = false;
         }
         if (method == "FaCT-R" || method == "FaCT-ORP") {
           config.tree_executor.execution_schedule =
@@ -435,7 +404,6 @@ int main(int argc, char **argv) {
           config.tree_executor.scope_order_policy =
               whatif::core::ScopeOrderPolicy::Random;
           config.tree_executor.scope_order_seed = scope_order_seed;
-          config.tree_executor.scope_order_from_unpruned_lattice = true;
         } else {
           config.tree_executor.execution_schedule =
               whatif::core::ExecutionSchedule::DfsPrefixTree;
@@ -446,88 +414,6 @@ int main(int argc, char **argv) {
               adjustment_scope_plan->explicit_cube_scopes;
         }
       }
-    }
-
-    const bool dump_scopes = std::getenv("CAUSAL_INDEX_DUMP_SCOPES") != nullptr;
-    const bool plan_only = std::getenv("CAUSAL_INDEX_PLAN_ONLY") != nullptr;
-    if (dump_scopes) {
-      for (const auto &tree : trees) {
-        std::cout << "plan_tree=" << tree.id;
-        for (const auto &variable : tree.variables) {
-          std::cout << '\t' << variable;
-        }
-        std::cout << '\n';
-      }
-      if (adjustment_scope_plan) {
-        for (const auto &[tree_id, scopes] :
-             adjustment_scope_plan->explicit_cube_scopes) {
-          for (const auto &scope : scopes) {
-            std::cout << "plan_scope=" << tree_id;
-            for (const auto &variable : scope) {
-              std::cout << '\t' << variable;
-            }
-            std::cout << '\n';
-          }
-        }
-        for (const auto &scope : adjustment_scope_plan->exact_scope_workload) {
-          std::cout << "plan_exact_scope=" << scope.id;
-          for (const auto &variable : scope.scope) {
-            std::cout << '\t' << variable;
-          }
-          std::cout << '\n';
-        }
-      }
-    }
-    if (plan_only) {
-      std::cout << "plan_only=1\n";
-      std::cout << "parent_trees=" << trees.size() << '\n';
-      std::cout << "localizable_query_scopes="
-                << (parent_tree_plan
-                        ? parent_tree_plan->stats.localizable_query_scopes
-                        : 0)
-                << '\n';
-      std::cout << "covered_localizable_query_scopes="
-                << (parent_tree_plan
-                        ? parent_tree_plan->stats
-                              .covered_localizable_query_scopes
-                        : 0)
-                << '\n';
-      std::cout << "adjustment_retained_local_scopes="
-                << (adjustment_scope_plan
-                        ? adjustment_scope_plan->retained_local_cube_scopes
-                        : 0)
-                << '\n';
-      std::cout << "cost_merge_candidates="
-                << (parent_tree_plan
-                        ? parent_tree_plan->stats.cost_merge_candidates
-                        : 0)
-                << '\n';
-      std::cout << "cost_rejected_merges="
-                << (parent_tree_plan
-                        ? parent_tree_plan->stats.cost_rejected_merges
-                        : 0)
-                << '\n';
-      std::cout << "estimated_initial_tree_cost="
-                << (parent_tree_plan
-                        ? parent_tree_plan->stats.estimated_initial_tree_cost
-                        : 0.0)
-                << '\n';
-      std::cout << "estimated_final_tree_cost="
-                << (parent_tree_plan
-                        ? parent_tree_plan->stats.estimated_final_tree_cost
-                        : 0.0)
-                << '\n';
-      std::cout << "estimated_boundary_cost="
-                << (parent_tree_plan
-                        ? parent_tree_plan->stats.estimated_boundary_cost
-                        : 0.0)
-                << '\n';
-      std::cout << "estimated_total_cost="
-                << (parent_tree_plan
-                        ? parent_tree_plan->stats.estimated_total_cost
-                        : 0.0)
-                << '\n';
-      return 0;
     }
 
     if (!snapshot.parent_path().empty()) {

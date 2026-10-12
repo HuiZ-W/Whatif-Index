@@ -48,7 +48,7 @@ if(BUILD_TESTING)
   target_include_directories(whatif_test_reference PUBLIC tests)
 
   foreach(test IN ITEMS boundary_join_tests wide_scope_tests full_join_rollup_tests
-                        streaming_full_join_tests scale_sampling_tests join_metrics_tests
+                        streaming_full_join_tests input_loading_tests join_metrics_tests
                         core_tests shared_construction_tests)
     add_executable(${test} tests/${test}.cpp)
     target_link_libraries(${test} PRIVATE whatif_index)

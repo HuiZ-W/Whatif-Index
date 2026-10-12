@@ -45,13 +45,26 @@ def main():
         for method in METHODS:
             mode = 'FullCubeQuery' if method.startswith('FullCube') else 'FaCTQuery'
             snapshot = root / (method + '.bin')
-            output = run([args.build_dir / 'whatif_build', data, method, snapshot, '6'])
+            output = run([args.build_dir / 'whatif_build', data, method, snapshot, '6', '20260716'])
             assert f'method={method}' in output.splitlines(), output
+            assert 'scope_order_seed=20260716' in output.splitlines(), output
             actual = query(worker, snapshot, data, mode, request)
             if expected is None:
                 expected = actual
             assert actual == expected, (method, actual, expected)
             print(f'{method}: counts and probability match')
+        # The optional argument after the width is the random-order seed.
+        seeded = root / 'seeded.bin'
+        first = run([args.build_dir / 'whatif_build', data, 'FaCT-O', seeded, '6', '17'])
+        second = run([args.build_dir / 'whatif_build', data, 'FaCT-O', root / 'repeat.bin', '6', '17'])
+        assert 'scope_order_seed=17' in first.splitlines(), first
+        order = lambda output: next(line for line in output.splitlines() if line.startswith('shared_variable_order'))
+        assert order(first) == order(second)
+        result = subprocess.run(
+            [str(args.build_dir / 'whatif_build'), str(data), 'FaCT', str(root / 'extra.bin'), '6', '0', '17'],
+            text=True, capture_output=True, timeout=120)
+        assert result.returncode != 0 and 'usage:' in result.stderr, result
+        assert not (root / 'extra.bin').exists()
         # Old names must fail, rather than silently selecting another policy.
         for method in ('full-join', 'boundary-adjustment-prune', 'parent-no-reuse',
                        'fact', 'unknown'):
