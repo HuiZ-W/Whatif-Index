@@ -138,6 +138,9 @@ enum class LocalCubePolicy {
 };
 
 struct BoundaryBuildConfig {
+  // Optional reference workload for controlled ordering ablations. Empty uses
+  // the actual deduplicated output scopes. Variable IDs identify fixed patterns.
+  std::vector<std::vector<VariableId>> ordering_scopes;
   // Query-independent directed prefixes/suffixes incident to tree boundaries.
   bool materialize_structural_boundaries = false;
   LocalCubePolicy cube_policy = LocalCubePolicy::AllSubsets;
@@ -166,6 +169,19 @@ struct BoundaryBuildConfig {
   // answerable without rematching the property graph.
   bool materialize_variable_attachments = false;
   whatif::core::LatticeBuildConfig tree_executor;
+};
+
+struct SharedConstructionStats {
+  std::vector<VariableId> variable_order;
+  std::vector<std::vector<VariableId>> construction_order;
+  std::size_t unique_scopes = 0;
+  std::size_t prefix_extensions = 0;
+  std::size_t recovery_attempts = 0;
+  std::size_t recovery_used = 0;
+  std::size_t recovered_rows = 0;
+  // DD residual, DR, RD, RR in the last binary join.
+  std::array<std::size_t, 4> completion_rows{};
+  std::size_t donor_peak_bytes = 0;
 };
 
 struct BoundaryJoinResult {
@@ -230,6 +246,7 @@ public:
   const std::vector<BoundaryView> &boundaryViews() const {
     return boundary_views_;
   }
+  const SharedConstructionStats &constructionStats() const { return construction_stats_; }
 
   const CubeTable &cube(const std::string &tree_id,
                         const std::vector<VariableId> &scope) const;
@@ -257,6 +274,7 @@ public:
       OnlineScopeStats *stats = nullptr, bool plan_only = false) const;
 
 private:
+  SharedConstructionStats construction_stats_;
   struct ScopeHash {
     std::size_t operator()(const std::vector<VariableId> &scope) const {
       std::size_t hash = 0;

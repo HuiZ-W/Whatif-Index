@@ -159,7 +159,7 @@ buildDetailedIndex(whatif::core::ExecutionSchedule schedule =
 }
 
 void assertDetailedResult(const MaterializedBoundaryIndex &index) {
-  assert(index.cubes().size() == 13); // 3 + 7 + 3 local subsets.
+  assert(index.cubes().size() == 11); // shared Y and W singletons are stored once.
   const auto &xy_cube = index.cube("T1", {"X", "Y"});
   assert(xy_cube.counts.at({"en", "sports"}) == 2);
   assert(xy_cube.counts.at({"zh", "music"}) == 1);

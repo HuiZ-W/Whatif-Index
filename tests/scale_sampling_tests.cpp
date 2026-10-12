@@ -31,5 +31,14 @@ int main() {
       previous[input[v].id]=ids;
     }
   }
+  // A variable with no surviving matches is still part of the fixed DAG.
+  {
+    std::ofstream manifest(dir / "variable_manifest.csv");
+    manifest << "variable_id,roles\nA,P\nB,P\nC,P\nEmpty,P\n";
+  }
+  const auto with_empty=loadVariables(path,0);
+  assert(with_empty.size()==4);
+  assert(with_empty.back().id=="Empty" && with_empty.back().instances.empty());
+  assert(with_empty.back().pattern_roles==std::vector<RoleId>{"P"});
   std::filesystem::remove_all(dir);
 }

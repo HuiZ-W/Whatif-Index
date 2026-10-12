@@ -1,6 +1,8 @@
 #include "whatif/AdjustmentScopePlanner.h"
 #include "whatif/BoundaryJoinIndex.h"
 #include "whatif/ParentTreePlanner.h"
+#include "whatif/PatternManifest.h"
+#include <boost/property_tree/json_parser.hpp>
 
 #include <algorithm>
 #include <atomic>
@@ -86,6 +88,11 @@ std::vector<VariableInput> loadVariables(const std::filesystem::path &path,
 
   std::map<VariableId, std::vector<whatif::core::MatchInstance>> instances;
   std::map<VariableId, std::set<RoleId>> roles;
+  const auto schemas = loadPatternSchemas(path.parent_path() / "variable_manifest.csv");
+  for (const auto &[v, schema] : schemas) {
+    instances[v];
+    roles[v].insert(schema.begin(), schema.end());
+  }
   InstanceId next_id = 1;
   std::string line;
   while (std::getline(input, line)) {
@@ -97,6 +104,12 @@ std::vector<VariableInput> loadVariables(const std::filesystem::path &path,
       continue;
     }
     auto parsed_roles = parseRoles(columns[0]);
+    if (!schemas.empty()) {
+      std::vector<RoleId> actual;
+      for (const auto &r : parsed_roles) actual.push_back(r.role);
+      const auto s = schemas.find(columns[1]);
+      if (s == schemas.end() || actual != s->second) throw std::runtime_error("assignment/manifest schema mismatch");
+    }
     for (const auto &binding : parsed_roles) {
       roles[columns[1]].insert(binding.role);
     }
@@ -250,14 +263,22 @@ int main(int argc, char **argv) {
       throw std::runtime_error("WIDTH_BOUND must be positive");
     }
     const auto scale_text = std::getenv("CAUSAL_INDEX_SCALE_PERCENT");
-    const std::size_t scale_percent = scale_text ? std::stoull(scale_text) : 100;
-    if (scale_percent < 1 || scale_percent > 100)
-      throw std::runtime_error("scale percent must be in [1,100]");
+    if (scale_text && std::string(scale_text) != "100")
+      throw std::runtime_error("row subsampling is not a PG scale experiment; use scripts/prepare_induced_scale.py");
+    if (std::filesystem::exists(dataset.parent_path() / "INCOMPLETE"))
+      throw std::runtime_error("induced scale preparation is incomplete");
+    std::size_t scale_percent = 100;
+    if (std::filesystem::exists(dataset / "scale_manifest.json")) {
+      boost::property_tree::ptree scale;
+      boost::property_tree::read_json((dataset / "scale_manifest.json").string(), scale);
+      scale_percent = scale.get<std::size_t>("percent");
+      if (scale_percent < 1 || scale_percent > 100) throw std::runtime_error("invalid scale manifest percent");
+    }
 
     std::vector<VariableInput> variables;
     CausalInput causal;
     double load_ms = measureMilliseconds([&] {
-      variables = loadVariables(dataset / "assignments_raw.tsv", instance_cap, scale_percent);
+      variables = loadVariables(dataset / "assignments_raw.tsv", instance_cap);
       causal = loadCausalInput(dataset / "causal.tsv", variables);
     });
     if (variables.empty()) {
@@ -384,7 +405,11 @@ int main(int argc, char **argv) {
             std::move(adjustment_scope_plan->boundary_plan);
         config.tree_executor.variable_order_policy =
             whatif::core::VariableOrderPolicy::PartialWorkloadGreedy;
-        config.tree_executor.plan_order_from_unpruned_lattice = true;
+        config.tree_executor.enable_derive = method != "FaCT-R" && method != "FaCT-ORP";
+        // Use FaCT's retained targets for the order in the pruning ablation;
+        // only the executed/materialized scopes change in FaCT-P.
+        for (const auto &[tree_id, scopes] : adjustment_scope_plan->explicit_cube_scopes)
+          config.ordering_scopes.insert(config.ordering_scopes.end(), scopes.begin(), scopes.end());
       };
 
       {
@@ -403,6 +428,8 @@ int main(int argc, char **argv) {
           config.tree_executor.execution_schedule =
               whatif::core::ExecutionSchedule::IndependentSources;
         } else if (random_scope_order) {
+          config.tree_executor.variable_order_policy = whatif::core::VariableOrderPolicy::Random;
+          config.tree_executor.variable_order_seed = scope_order_seed;
           config.tree_executor.execution_schedule =
               whatif::core::ExecutionSchedule::ScopeOrderedWorkingPath;
           config.tree_executor.scope_order_policy =
@@ -603,6 +630,16 @@ int main(int argc, char **argv) {
     std::cout << std::fixed << std::setprecision(3);
     std::cout << "dataset=" << dataset.string() << '\n';
     std::cout << "method=" << method << '\n';
+    const auto &shared = index.constructionStats();
+    std::cout << "shared_unique_scopes=" << shared.unique_scopes << '\n'
+              << "shared_prefix_extensions=" << shared.prefix_extensions << '\n'
+              << "recovery_attempts=" << shared.recovery_attempts << '\n'
+              << "recovery_used=" << shared.recovery_used << '\n'
+              << "recovered_rows=" << shared.recovered_rows << '\n'
+              << "donor_peak_bytes=" << shared.donor_peak_bytes << '\n';
+    std::cout << "shared_variable_order";
+    for (const auto &v : shared.variable_order) std::cout << '\t' << v;
+    std::cout << '\n';
     std::cout << "scope_order_seed=" << scope_order_seed << '\n';
     std::cout << "worker_threads=1\n";
     std::cout << "cube_storage="

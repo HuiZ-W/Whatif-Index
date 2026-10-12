@@ -12,7 +12,7 @@ C++17 implementation of **FaCT**, a cube-based index for what-if queries on prop
 
 The public C++ namespace is `whatif`; shared execution primitives use `whatif::core`.
 Global causal scopes use Boost.Multiprecision; local cube masks remain bounded-width.
-All experiment methods use this single source tree and select their construction policy through the `METHOD` argument. Snapshot format identifiers are unchanged so previously generated indexes remain readable.
+The construction methods use the `METHOD` argument of `whatif_build`; online methods use the entry points below. Snapshot format identifiers are unchanged so previously generated indexes remain readable.
 
 ## Requirements
 
@@ -37,7 +37,7 @@ The C++ tests cover boundary joins, snapshot round trips, wide causal scopes, ro
 
 The test suite includes the index tests, shared-executor regression tests, and three causal-workload fixtures. Test-only reference code can be excluded with `-DBUILD_TESTING=OFF`.
 
-The test suite includes 11 CTest checks (including a CLI smoke test for all seven public construction methods) and 10 SQLite tests. The CLI test checks counts, query answers, method labels, and rejection of unsupported method names. Snapshot format identifiers are unchanged. The existing Boost.Multiprecision compiler warning does not prevent compilation or these tests from passing.
+The test suite includes 14 CTest checks and 10 SQLite tests. Tests compare all seven construction methods with direct joins, including cyclic motifs, cross-tree queries and empty populations. Additional tests cover global prefix sharing, snapshot references to shared cuboids, all four residual join partitions, donor deduplication, more than 64 global variables, and induced-subgraph sampling. The existing Boost.Multiprecision compiler warning does not prevent compilation or these tests from passing.
 
 ## Quick start
 
@@ -60,6 +60,13 @@ Evaluate the supplied query:
 The worker emits a readiness record followed by the query response. The example has four complete mappings and returns `P(Y=1 | do(X=1)) = 1`.
 
 For **FullCubeQuery**, pass `FullCubeQuery` as the final argument to `whatif_query`, with a snapshot built by `FullCube` or `FullCube+`. For **OnlineJoin**, run `./build/whatif_online_join examples/tiny < examples/tiny/query.json`; it joins the supplied pattern matches without a cube index.
+
+For example, build and query the full-cube baseline:
+
+```sh
+./build/whatif_build examples/tiny FullCube results/full.bin 6
+./build/whatif_query results/full.bin examples/tiny/causal.tsv FullCubeQuery < examples/tiny/query.json
+```
 
 Run **CaRL-PG**, the SQLite baseline:
 
@@ -111,16 +118,40 @@ DATASET_DIR METHOD SNAPSHOT [WIDTH_BOUND=6] [INSTANCE_CAP=0] [SCOPE_ORDER_SEED=2
 | `FullCube` | Full cube, independently joining each scope |
 | `FullCube+` | Full cube with rollup projection and residual-join completion |
 | `FaCT` | Proposed construction with ordering, reuse, and adjustment-set pruning |
-| `FaCT-O` | Random scope order with reuse and pruning retained |
+| `FaCT-O` | Random variable and construction orders, with reuse and pruning retained |
 | `FaCT-P` | Proposed ordering and reuse, without adjustment-set pruning |
 | `FaCT-R` | Proposed ordering and pruning, with scopes joined independently |
 | `FaCT-ORP` | Same decomposition and boundary workload, with fixed alphabetical order, independent scope joins, and no adjustment-set scope pruning |
 
-Method names are case-sensitive and match the paper; legacy command-line names and non-paper experimental branches are not exposed. `FaCT-O` randomizes the scope traversal while retaining the greedy variable order within scopes. `FaCT-P` disables adjustment-set scope pruning, not boundary-view redundancy elimination.
+Method names are case-sensitive; old command-line aliases are not accepted. All FaCT variants use the same Parent Trees and boundary workload. `FaCT-P` uses FaCT's ordering reference scopes but materializes all local subsets; it disables adjustment-set scope pruning, not boundary-view redundancy elimination. `FaCT-R` and `FaCT-ORP` disable both prefix reuse and recover-and-complete.
 
-`WIDTH_BOUND` is the paper's width bound `b`; it controls planner merging and does not split an oversized atomic parent scope. `INSTANCE_CAP=0` applies no additional instance cap. Construction reports loading, planning, construction and snapshot metrics separately. `build_join_count` counts calls, whereas `join_work_pairs` counts candidate pair work; these are different measurements.
+FaCT deduplicates target scopes across Parent Trees, chooses a global variable order using the paper's estimated prefix-mass score, and traverses their shared sparse trie. A variable ID identifies one fixed pattern, output expression, and mapping schema; different pattern definitions must use different IDs. Shared cuboids have one physical owner and remain accessible from every containing Parent Tree after saving and loading.
 
-`CAUSAL_INDEX_SCALE_PERCENT` optionally subsamples each variable's input rows. This is instance subsampling, **not** induced-subgraph sampling. Preserve the intended population and measurement protocol when comparing experiments.
+Recover-and-complete projects a cached superset's full mappings, deduplicates them by match identity, and executes residual joins for all four input partitions, including missing pairs within the two participating input sets. It is selected only when its estimated extraction, deduplication and completion cost is below a direct join. Donor payloads have a 512 MiB accounted cache budget by default; active trie paths and final outputs are outside that budget. The library setting `tree_executor.rollup_cache_bytes` controls this budget. Construction logs report `recovery_used`, `recovered_rows`, `donor_peak_bytes`, and the chosen variable order.
+
+Run the construction methods on the same input:
+
+```sh
+for method in FullCube 'FullCube+' FaCT FaCT-O FaCT-P FaCT-R FaCT-ORP; do
+  ./build/whatif_build examples/tiny "$method" "results/$method.bin" 6 0 20260716
+done
+```
+
+`WIDTH_BOUND` is the paper's width bound `b`; it controls planner merging and does not split an oversized atomic parent scope. `INSTANCE_CAP=0` applies no additional instance cap. Construction reports loading, planning, construction and snapshot metrics separately. `build_join_count` counts calls, whereas `join_work_pairs` counts compatible physical pairs before output compaction, excluding recovered results; these are different measurements.
+
+### Induced-subgraph scale inputs
+
+Scale experiments select vertices from the original PG, not rows independently from each variable. Supply the complete original vertex universe (including vertices absent from all pattern matches) as a headerless file with one canonical node ID per line. For fixed positive patterns with all matched vertices retained in each mapping, restriction to a selected vertex set is exactly equivalent to rematching those patterns on the induced subgraph:
+
+```sh
+python3 scripts/prepare_induced_scale.py DATASET_DIR VERTICES.tsv SCALE_OUTPUT \
+  --percent 20 40 60 80 100 --seed 20260716 --positive-patterns
+./build/whatif_build SCALE_OUTPUT/20pct FaCT results/scale20.bin 6
+```
+
+The script writes nested vertex samples, filtered matches, unchanged causal/schema files, and per-scale manifests. It refuses to overwrite an existing destination. Variables with zero surviving matches remain in `variable_manifest.csv` and in the causal DAG. An `INCOMPLETE` marker indicates an interrupted preparation and must not be benchmarked. Use the same query file and scale input directory for every method. The script keeps a vertex ranking in memory, so its memory requirement is linear in the original vertex count.
+
+For negation, shortest-path, degree, or graph-dependent aggregation patterns, regenerate matches on each induced PG upstream instead of passing `--positive-patterns`. The old row-subsampling environment option is rejected unless its value is `100`. `INSTANCE_CAP` is a debug cap and must remain zero for formal scale experiments.
 
 ## Release scope and reproducibility
 

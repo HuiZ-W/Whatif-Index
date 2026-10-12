@@ -11,6 +11,7 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+#include "whatif/PatternManifest.h"
 
 using boost::property_tree::ptree;
 namespace {
@@ -63,6 +64,8 @@ std::vector<Row> distinctRows(const std::vector<Row> &rows, Deadline deadline) {
 class OnlineJoinEngine {
  public:
   explicit OnlineJoinEngine(const std::string &directory) {
+    const auto schemas = whatif::loadPatternSchemas(std::filesystem::path(directory) / "variable_manifest.csv");
+    for (const auto &[v, roles] : schemas) relations_[v];
     std::ifstream input(directory + "/assignments_raw.tsv");
     if (!input) throw std::runtime_error("cannot open assignments_raw.tsv");
     std::string line;
@@ -84,6 +87,12 @@ class OnlineJoinEngine {
           throw std::runtime_error("non-injective or duplicate binding");
       }
       if (row.bindings.empty()) throw std::runtime_error("empty binding");
+      if (!schemas.empty()) {
+        std::vector<std::string> actual;
+        for (const auto &[role,node] : row.bindings) actual.push_back(role);
+        const auto s=schemas.find(variable);
+        if(s==schemas.end() || actual!=s->second) throw std::runtime_error("assignment/manifest schema mismatch");
+      }
       row.values.emplace(variable, line.substr(second + 1));
       relations_[variable].push_back(row);
       ++records_;

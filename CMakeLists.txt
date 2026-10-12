@@ -23,6 +23,7 @@ add_library(whatif_index
   src/CausalAdjustment.cpp
   src/AdjustmentScopePlanner.cpp
   src/BoundaryJoinIndex.cpp
+  src/SharedConstruction.cpp
   src/BoundaryRequirementPlanner.cpp
   src/ParentTreePlanner.cpp
   src/Snapshot.cpp
@@ -48,7 +49,7 @@ if(BUILD_TESTING)
 
   foreach(test IN ITEMS boundary_join_tests wide_scope_tests full_join_rollup_tests
                         streaming_full_join_tests scale_sampling_tests join_metrics_tests
-                        core_tests)
+                        core_tests shared_construction_tests)
     add_executable(${test} tests/${test}.cpp)
     target_link_libraries(${test} PRIVATE whatif_index)
     target_compile_options(${test} PRIVATE -UNDEBUG)
@@ -72,6 +73,11 @@ if(BUILD_TESTING)
   endforeach()
   find_package(Python3 COMPONENTS Interpreter QUIET)
   if(Python3_Interpreter_FOUND)
+    add_test(NAME induced_scale_test
+      COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_induced_scale.py)
+    add_test(NAME paper_methods_test
+      COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/paper_methods_test.py
+              --build-dir ${CMAKE_CURRENT_BINARY_DIR})
     add_test(NAME cli_smoke
       COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/cli_smoke.py
               --build-dir ${CMAKE_CURRENT_BINARY_DIR})

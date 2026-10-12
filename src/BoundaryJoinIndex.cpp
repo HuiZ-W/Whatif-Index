@@ -1,6 +1,7 @@
 #include "whatif/BoundaryJoinIndex.h"
 
 #include "whatif/CausalAdjustment.h"
+#include "whatif/SharedConstruction.h"
 
 #include <algorithm>
 #include <cstring>
@@ -397,6 +398,107 @@ MaterializedBoundaryIndex MaterializedBoundaryIndex::build(
     }
   }
 
+  if (!config.stream_all_subset_cubes) {
+    using Scope = std::vector<VariableId>;
+    auto canonical = [](Scope scope) { std::sort(scope.begin(), scope.end()); return scope; };
+    // One mapping relation per fixed combined pattern. Rewire query metadata
+    // to its physical owner rather than copying it for every Parent Tree.
+    std::map<Scope, std::size_t> requirement_owner;
+    std::unordered_map<std::string, std::string> view_alias;
+    std::vector<BoundaryRequirement> requirements;
+    for (const auto &r : index.plan_.requirements) {
+      auto [p, fresh] = requirement_owner.emplace(canonical(r.scope), requirements.size());
+      if (fresh) requirements.push_back(r);
+      else {
+        auto &owner = requirements[p->second];
+        view_alias[r.view_id] = owner.view_id;
+        owner.direction_flags |= r.direction_flags;
+        owner.query_ids.insert(owner.query_ids.end(), r.query_ids.begin(), r.query_ids.end());
+        std::sort(owner.query_ids.begin(), owner.query_ids.end());
+        owner.query_ids.erase(std::unique(owner.query_ids.begin(), owner.query_ids.end()), owner.query_ids.end());
+      }
+    }
+    index.plan_.requirements = std::move(requirements);
+    for (auto &q : index.plan_.queries) {
+      std::set<std::string> seen;
+      std::vector<std::string> ids;
+      for (auto id : q.view_ids) {
+        auto p = view_alias.find(id);
+        if (p != view_alias.end()) id = p->second;
+        if (seen.insert(id).second) ids.push_back(std::move(id));
+      }
+      q.view_ids = std::move(ids);
+    }
+    std::map<Scope, const ParentTreeSpec *> cube_owner;
+    std::map<Scope, std::vector<const BoundaryRequirement *>> views;
+    std::set<Scope> targets;
+    for (const auto &tree : parent_trees) {
+      std::vector<Scope> scopes;
+      if (config.cube_policy == LocalCubePolicy::AllSubsets)
+        scopes = allNonEmptyScopes(tree, config.max_all_subset_width);
+      else {
+        auto p = config.explicit_cube_scopes.find(tree.id);
+        if (p != config.explicit_cube_scopes.end()) scopes = p->second;
+      }
+      // An explicit query may become local after Parent Tree merging.
+      // Retain its exact scope even if it was absent from the local plan.
+      for (const auto &q : index.plan_.queries) {
+        if (!q.view_ids.empty() || !q.treatments.empty() || !q.outcomes.empty()) continue;
+        if (std::all_of(q.global_scope.begin(), q.global_scope.end(), [&](const auto &v) {
+              return std::find(tree.variables.begin(), tree.variables.end(), v) != tree.variables.end();
+            })) scopes.push_back(q.global_scope);
+      }
+      for (const auto &s : scopes) {
+        const auto scope = canonical(canonicalTreeScope(tree, s));
+        cube_owner.emplace(scope, &tree);
+        targets.insert(scope);
+      }
+    }
+    for (const auto &r : index.plan_.requirements) {
+      auto scope = canonical(r.scope);
+      views[scope].push_back(&r);
+      targets.insert(scope);
+      if (!config.ordering_scopes.empty()) config.ordering_scopes.push_back(scope);
+    }
+    index.construction_stats_ = constructSharedScopes(variables,
+        {targets.begin(), targets.end()}, config,
+        [&](const Scope &scope, const std::vector<BoundaryRow> &rows) {
+          auto owner = cube_owner.find(scope);
+          if (owner != cube_owner.end()) {
+            CubeTable cube;
+            cube.tree_id = owner->second->id;
+            cube.scope = canonicalTreeScope(*owner->second, scope);
+            for (const auto &row : rows) {
+              ValueTuple values;
+              for (const auto &v : cube.scope) values.push_back(findBinding(row, v)->raw_value);
+              auto &count = cube.counts[values];
+              count = checkedAdd(count, row.multiplicity);
+            }
+            if (config.streamed_cube_sink) config.streamed_cube_sink(std::move(cube));
+            else index.cubes_.push_back(std::move(cube));
+          }
+          auto required = views.find(scope);
+          if (required != views.end()) for (const auto *r : required->second) {
+            BoundaryView view;
+            view.id = r->view_id; view.tree_id = r->tree_id; view.scope = r->scope;
+            view.rows = rows;
+            std::sort(view.rows.begin(), view.rows.end(), [](const auto &a, const auto &b) {
+              return boundaryRowKey(a) < boundaryRowKey(b);
+            });
+            index.boundary_views_.push_back(std::move(view));
+          }
+        });
+    std::sort(index.cubes_.begin(), index.cubes_.end(), [](const auto &a, const auto &b) {
+      if (a.tree_id != b.tree_id) return a.tree_id < b.tree_id;
+      if (a.scope.size() != b.scope.size()) return a.scope.size() < b.scope.size();
+      return a.scope < b.scope;
+    });
+    std::sort(index.boundary_views_.begin(), index.boundary_views_.end(),
+        [](const auto &a, const auto &b) { return a.id < b.id; });
+    index.rebuildCubeLookup();
+    return index;
+  }
+
   std::unordered_map<VariableId, VariableInput> variable_inputs;
   for (auto &variable : variables) {
     if (!variable_inputs.emplace(variable.id, std::move(variable)).second) {
@@ -454,155 +556,7 @@ MaterializedBoundaryIndex MaterializedBoundaryIndex::build(
       continue;
     }
 
-    std::vector<std::vector<VariableId>> cube_scopes;
-    if (config.cube_policy == LocalCubePolicy::AllSubsets) {
-      cube_scopes = allNonEmptyScopes(tree, config.max_all_subset_width);
-    } else {
-      const auto found = config.explicit_cube_scopes.find(tree.id);
-      if (found != config.explicit_cube_scopes.end()) {
-        for (const auto &scope : found->second) {
-          cube_scopes.push_back(canonicalTreeScope(tree, scope));
-        }
-      }
-    }
-
-    // An exact scope normally spans several split Trees. Keep the API robust
-    // when a supplied exact scope becomes local after a later merge.
-    for (const auto &query : index.plan_.queries) {
-      if (!query.view_ids.empty() || !query.treatments.empty() ||
-          !query.outcomes.empty()) {
-        continue;
-      }
-      const std::unordered_set<VariableId> members(tree.variables.begin(),
-                                                   tree.variables.end());
-      if (std::all_of(query.global_scope.begin(), query.global_scope.end(),
-                      [&](const auto &v) { return members.count(v) != 0; })) {
-        auto scope = canonicalTreeScope(tree, query.global_scope);
-        if (std::none_of(
-                cube_scopes.begin(), cube_scopes.end(),
-                [&](const auto &old) { return sameScope(old, scope); })) {
-          cube_scopes.push_back(std::move(scope));
-        }
-      }
-    }
-
-    std::vector<std::vector<VariableId>> boundary_scopes;
-    for (const auto *requirement : requirements_by_tree[tree.id]) {
-      boundary_scopes.push_back(canonicalTreeScope(tree, requirement->scope));
-    }
-
-    std::vector<std::vector<VariableId>> target_scopes = cube_scopes;
-    for (const auto &scope : boundary_scopes) {
-      if (std::none_of(target_scopes.begin(), target_scopes.end(),
-                       [&](const auto &existing) {
-                         return sameScope(existing, scope);
-                       })) {
-        target_scopes.push_back(scope);
-      }
-    }
-    if (target_scopes.empty()) {
-      continue;
-    }
-
-    auto tree_config = config.tree_executor;
-    tree_config.target_scopes = target_scopes;
-    tree_config.source_output_scopes.clear();
-    tree_config.binding_output_scopes = boundary_scopes;
-    tree_config.store_all_supports = false;
-    tree_config.store_value_counts = true;
-    tree_config.enable_derive = false;
-    tree_config.derive_materialization_budget_tuples = 0;
-    tree_config.store_participation = false;
-    tree_config.store_derive_results = false;
-    if (config.streamed_cube_sink) {
-      std::unordered_map<whatif::core::Mask, std::vector<VariableId>>
-          cube_scope_by_mask;
-      std::unordered_map<VariableId, std::size_t> local_position;
-      for (std::size_t i = 0; i < local_inputs.size(); ++i) {
-        local_position.emplace(local_inputs[i].id, i);
-      }
-      for (const auto &scope : cube_scopes) {
-        whatif::core::Mask mask = 0;
-        for (const auto &variable : scope) {
-          const auto found = local_position.find(variable);
-          if (found == local_position.end()) {
-            throw std::runtime_error("Cube scope references missing local variable " +
-                                     variable);
-          }
-          mask |= whatif::core::Mask{1} << found->second;
-        }
-        cube_scope_by_mask.emplace(mask, scope);
-      }
-      tree_config.streamed_value_count_sink =
-          [&, tree_id = tree.id,
-           cube_scope_by_mask = std::move(cube_scope_by_mask)](
-              whatif::core::Mask mask,
-              std::map<std::vector<std::string>, whatif::core::Count>
-                  &&counts) {
-            const auto found = cube_scope_by_mask.find(mask);
-            if (found == cube_scope_by_mask.end()) {
-              return;
-            }
-            CubeTable cube;
-            cube.tree_id = tree_id;
-            cube.scope = found->second;
-            cube.counts = std::move(counts);
-            config.streamed_cube_sink(std::move(cube));
-          };
-    }
-    whatif::core::FullLatticeIndex local_index(std::move(local_inputs),
-                                                  std::move(tree_config));
-    local_index.build();
-
-    if (!config.streamed_cube_sink) {
-      for (const auto &scope : cube_scopes) {
-        const auto mask = local_index.maskOf(scope);
-        CubeTable cube;
-        cube.tree_id = tree.id;
-        cube.scope = scope;
-        cube.counts = local_index.result().value_counts[mask];
-        index.cubes_.push_back(std::move(cube));
-      }
-    }
-
-    for (const auto *requirement : requirements_by_tree[tree.id]) {
-      const auto mask = local_index.maskOf(requirement->scope);
-      BoundaryView view;
-      view.id = requirement->view_id;
-      view.tree_id = tree.id;
-      view.scope = requirement->scope;
-      const std::unordered_set<VariableId> in_scope(requirement->scope.begin(),
-                                                    requirement->scope.end());
-      for (const auto &source_row :
-           local_index.result().binding_outputs[mask]) {
-        BoundaryRow row;
-        for (std::size_t variable = 0;
-             variable < local_index.variables().size(); ++variable) {
-          const auto &variable_id = local_index.variables()[variable].id;
-          if (in_scope.count(variable_id) == 0) {
-            continue;
-          }
-          if (source_row.instance_ids[variable] ==
-              whatif::core::kNoInstance) {
-            throw std::runtime_error("materialized Boundary row misses " +
-                                     variable_id);
-          }
-          row.bindings.push_back({variable_id,
-                                  source_row.instance_ids[variable],
-                                  source_row.values[variable]});
-        }
-        row.role_nodes = source_row.role_nodes;
-        row.multiplicity = source_row.multiplicity;
-        view.rows.push_back(std::move(row));
-      }
-      std::sort(view.rows.begin(), view.rows.end(),
-                [](const auto &left, const auto &right) {
-                  return boundaryRowKey(left) < boundaryRowKey(right);
-                });
-      index.boundary_views_.push_back(std::move(view));
-    }
   }
-
   std::sort(index.cubes_.begin(), index.cubes_.end(),
             [](const auto &left, const auto &right) {
               if (left.tree_id != right.tree_id) {
@@ -640,6 +594,17 @@ MaterializedBoundaryIndex::cube(const std::string &tree_id,
         return item.tree_id == tree_id && sameScope(item.scope, scope);
       });
   if (found == cubes_.end()) {
+    // Shared cubes carry one physical owner's ID; every containing Parent Tree
+    // can reference the same record, including after a snapshot round trip.
+    const auto tree = std::find_if(parent_trees_.begin(), parent_trees_.end(),
+        [&](const auto &t) { return t.id == tree_id; });
+    if (tree != parent_trees_.end() && std::all_of(scope.begin(), scope.end(), [&](const auto &v) {
+          return std::find(tree->variables.begin(), tree->variables.end(), v) != tree->variables.end();
+        })) {
+      auto key = scope; std::sort(key.begin(), key.end());
+      const auto shared = cube_lookup_.find(key);
+      if (shared != cube_lookup_.end()) return cubes_[shared->second];
+    }
     throw std::runtime_error("unknown Tree-local cube");
   }
   return *found;
